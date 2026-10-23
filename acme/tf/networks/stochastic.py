@@ -15,6 +15,7 @@
 """Useful sonnet modules to chain after distributional module outputs."""
 
 from acme import types
+from acme.agents.tf.mpo import checkpointing
 from acme.tf import utils as tf2_utils
 import sonnet as snt
 import tensorflow as tf
@@ -39,10 +40,15 @@ class StochasticMeanHead(snt.Module):
 
 
 class StochasticSamplingHead(snt.Module):
-  """Simple sonnet module to sample from a tfp.Distribution."""
+  """Simple sonnet module to sample from a tfp.Distribution.
+
+  The seed comes from `tf.random.get_global_generator()`. Acme checkpoints that
+  generator, so a restarted actor continues the same action stream. A seedless
+  `sample()` uses `tf.random.uniform`, which does not.
+  """
 
   def __call__(self, distribution: tfd.Distribution):
-    return distribution.sample()
+    return distribution.sample(seed=checkpointing.stateless_seed())
 
 
 class ExpQWeightedPolicy(snt.Module):

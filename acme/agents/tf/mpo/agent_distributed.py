@@ -14,9 +14,11 @@
 
 """Defines the MPO distributed agent class."""
 
+import time
 from typing import Callable, Dict, Optional
 
 import acme
+from acme.agents.tf.mpo import checkpointing
 from acme import datasets
 from acme import specs
 from acme.adders import reverb as adders
@@ -29,11 +31,112 @@ from acme.tf import variable_utils as tf2_variable_utils
 from acme.utils import counting
 from acme.utils import loggers
 from acme.utils import lp_utils
+from acme.utils import paths
+from acme.utils import signals
+from absl import logging
 import dm_env
 import launchpad as lp
+from launchpad import address as lp_address
 import reverb
 import sonnet as snt
 import tensorflow as tf
+
+
+class _CheckpointingReverbNode(lp.ReverbNode):
+  """Replay server that reloads and periodically writes its tables.
+
+  The checkpoint directory is ~/acme/<acme_id>/checkpoints/replay. Starting the
+  server loads the newest checkpoint in that directory, so passing the same
+  --acme_id restores the buffer, including the insert/sample rate limiter.
+  """
+
+  def __init__(self, priority_tables_fn, checkpoint_time_delta_minutes: float):
+    super().__init__(priority_tables_fn,
+                     checkpoint_ctor=self._make_checkpointer)
+    self._checkpoint_time_delta_minutes = checkpoint_time_delta_minutes
+
+  @staticmethod
+  def _make_checkpointer():
+    directory = paths.process_path('~/acme', 'checkpoints', 'replay')
+    logging.info('Replay checkpoints: %s', directory)
+    return reverb.checkpointers.DefaultCheckpointer(path=directory)
+
+  def run(self):
+    priority_tables = self._priority_tables_fn()
+    self._server = reverb.Server(
+        tables=priority_tables,
+        port=lp_address.get_port_from_address(self._address.resolve()),
+        checkpointer=self._checkpoint_ctor())
+    client = self._server.localhost_client()
+    interval_secs = self._checkpoint_time_delta_minutes * 60
+    while not lp.wait_for_stop(interval_secs):
+      logging.info('Saving replay checkpoint: %s', client.checkpoint())
+    logging.info('Saving final replay checkpoint: %s', client.checkpoint())
+
+
+class _CheckpointingActor:
+  """Saves the actor checkpoint on a timer during `update`."""
+
+  def __init__(self, actor, checkpointer: tf2_savers.Checkpointer):
+    self._actor = actor
+    self._checkpointer = checkpointer
+
+  def __getattr__(self, name):
+    return getattr(self._actor, name)
+
+  def update(self, *args, **kwargs):
+    result = self._actor.update(*args, **kwargs)
+    self._checkpointer.save()
+    return result
+
+
+class _CheckpointingEnvironmentLoop(acme.EnvironmentLoop):
+  """Environment loop that writes the actor checkpoint when the program stops."""
+
+  def __init__(self, environment, actor, checkpointer, counter, logger):
+    super().__init__(environment, actor, counter=counter, logger=logger)
+    self._checkpointer = checkpointer
+
+  def run(self,
+          num_episodes: Optional[int] = None,
+          num_steps: Optional[int] = None) -> int:
+    if not (num_episodes is None or num_steps is None):
+      raise ValueError('Either "num_episodes" or "num_steps" should be None.')
+
+    def should_terminate(episode_count: int, step_count: int) -> bool:
+      return ((num_episodes is not None and episode_count >= num_episodes) or
+              (num_steps is not None and step_count >= num_steps))
+
+    def save_checkpoint():
+      logging.info('Saving actor checkpoint for restart.')
+      self._checkpointer.save(force=True)
+
+    episode_count = 0
+    step_count = 0
+    with signals.runtime_terminator(save_checkpoint):
+      while not should_terminate(episode_count, step_count):
+        episode_start = time.time()
+        result = self.run_episode()
+        result = {**result, **{'episode_duration': time.time() - episode_start}}
+        episode_count += 1
+        step_count += int(result['episode_length'])
+        self._logger.write(result)
+    return step_count
+
+
+class _MPOLearner(learning.MPOLearner):
+  """MPO learner that writes a checkpoint when the program stops."""
+
+  def run(self, num_steps: Optional[int] = None) -> None:
+    with signals.runtime_terminator(self._save_checkpoint):
+      super().run(num_steps)
+
+  def _save_checkpoint(self):
+    if self._checkpointer is not None:
+      logging.info('Saving learner checkpoint for restart.')
+      self._checkpointer.save(force=True)
+    if self._snapshotter is not None:
+      self._snapshotter.save(force=True)
 
 
 class DistributedMPO:
@@ -60,6 +163,7 @@ class DistributedMPO:
       policy_loss_factory: Optional[Callable[[], snt.Module]] = None,
       max_actor_steps: Optional[int] = None,
       log_every: float = 10.0,
+      checkpoint_time_delta_minutes: float = 10.0,
   ):
 
     if environment_spec is None:
@@ -84,6 +188,7 @@ class DistributedMPO:
     self._variable_update_period = variable_update_period
     self._max_actor_steps = max_actor_steps
     self._log_every = log_every
+    self._checkpoint_time_delta_minutes = checkpoint_time_delta_minutes
 
   def replay(self):
     """The replay storage."""
@@ -167,7 +272,7 @@ class DistributedMPO:
       policy_loss_module = None
 
     # Return the learning agent.
-    return learning.MPOLearner(
+    return _MPOLearner(
         policy_network=online_networks['policy'],
         critic_network=online_networks['critic'],
         observation_network=observation_network,
@@ -181,13 +286,15 @@ class DistributedMPO:
         policy_loss_module=policy_loss_module,
         dataset=dataset,
         counter=counter,
-        logger=logger)
+        logger=logger,
+        checkpoint_time_delta_minutes=self._checkpoint_time_delta_minutes)
 
   def actor(
       self,
       replay: reverb.Client,
       variable_source: acme.VariableSource,
       counter: counting.Counter,
+      actor_id: int = 0,
   ) -> acme.EnvironmentLoop:
     """The actor process."""
 
@@ -195,7 +302,9 @@ class DistributedMPO:
     observation_spec = self._environment_spec.observations
 
     # Create environment and target networks to act with.
-    environment = self._environment_factory(False)
+    # The wrapper records the latest timestep so a restart can continue it.
+    environment = checkpointing.ResumableEnvironment(
+        self._environment_factory(False))
     agent_networks = self._network_factory(action_spec)
 
     # Create a stochastic behavior policy.
@@ -240,8 +349,21 @@ class DistributedMPO:
         time_delta=self._log_every,
         steps_key='actor_steps')
 
+    # Random stream and, for a simulator, the physics state. actor_id keeps
+    # each actor's checkpoint separate across a restart.
+    checkpointer = tf2_savers.Checkpointer(
+        directory='~/acme',
+        subdirectory=f'actor_{actor_id}',
+        time_delta_minutes=self._checkpoint_time_delta_minutes,
+        objects_to_save={
+            'rng': tf.random.get_global_generator(),
+            'random_state': checkpointing.RandomState(environment),
+        })
+    actor = _CheckpointingActor(actor, checkpointer)
+
     # Create the run loop and return it.
-    return acme.EnvironmentLoop(environment, actor, counter, logger)
+    return _CheckpointingEnvironmentLoop(
+        environment, actor, checkpointer, counter, logger)
 
   def evaluator(
       self,
@@ -299,7 +421,9 @@ class DistributedMPO:
     program = lp.Program(name=name)
 
     with program.group('replay'):
-      replay = program.add_node(lp.ReverbNode(self.replay))
+      replay = program.add_node(
+          _CheckpointingReverbNode(
+              self.replay, self._checkpoint_time_delta_minutes))
 
     with program.group('counter'):
       counter = program.add_node(lp.CourierNode(self.counter))
@@ -333,6 +457,7 @@ class DistributedMPO:
       # Add actors which pull round-robin from our variable sources.
       for actor_id in range(self._num_actors):
         source = sources[actor_id % len(sources)]
-        program.add_node(lp.CourierNode(self.actor, replay, source, counter))
+        program.add_node(
+            lp.CourierNode(self.actor, replay, source, counter, actor_id))
 
     return program

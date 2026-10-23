@@ -22,8 +22,11 @@ from typing import Optional, Tuple
 
 from absl import flags
 
-ACME_ID = flags.DEFINE_string('acme_id', None,
-                              'Experiment identifier to use for Acme.')
+ACME_ID = flags.DEFINE_string(
+    'acme_id', None,
+    'Run id for logs and checkpoints under ~/acme/<acme_id>. '
+    'A new id is chosen when this is empty. Pass the previous id to '
+    'restart training from that checkpoint.')
 
 
 def process_path(path: str,

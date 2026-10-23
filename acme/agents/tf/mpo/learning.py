@@ -19,6 +19,7 @@ from typing import List, Optional
 
 import acme
 from acme import types
+from acme.agents.tf.mpo import checkpointing
 from acme.tf import losses
 from acme.tf import savers as tf2_savers
 from acme.tf import utils as tf2_utils
@@ -55,6 +56,7 @@ class MPOLearner(acme.Learner):
       logger: Optional[loggers.Logger] = None,
       checkpoint: bool = True,
       save_directory: str = '~/acme',
+      checkpoint_time_delta_minutes: Optional[float] = None,
   ):
 
     self._counter = counter or counting.Counter()
@@ -110,9 +112,30 @@ class MPOLearner(acme.Learner):
     self._snapshotter = None
 
     if checkpoint:
+      # Adam moments and the MPO dual variables are created on the first
+      # update. Build them now so restore fills them in instead of leaving
+      # them at their initial values.
+      checkpointing.materialize_learner_variables(self)
+      checkpoint_kwargs = {}
+      if checkpoint_time_delta_minutes is not None:
+        checkpoint_kwargs['time_delta_minutes'] = checkpoint_time_delta_minutes
+      # Tracing the snapshot draws from the global generator. Do it before
+      # restore so a restart does not spend those draws after the saved state.
+      self._snapshotter = tf2_savers.Snapshotter(
+          directory=save_directory,
+          **checkpoint_kwargs,
+          objects_to_save={
+              'policy':
+                  snt.Sequential([
+                      self._target_observation_network,
+                      self._target_policy_network
+                  ]),
+          })
+      self._random_state = checkpointing.RandomState()
       self._checkpointer = tf2_savers.Checkpointer(
           directory=save_directory,
           subdirectory='mpo_learner',
+          **checkpoint_kwargs,
           objects_to_save={
               'counter': self._counter,
               'policy': self._policy_network,
@@ -126,16 +149,8 @@ class MPOLearner(acme.Learner):
               'dual_optimizer': self._dual_optimizer,
               'policy_loss_module': self._policy_loss_module,
               'num_steps': self._num_steps,
-          })
-
-      self._snapshotter = tf2_savers.Snapshotter(
-          directory=save_directory,
-          objects_to_save={
-              'policy':
-                  snt.Sequential([
-                      self._target_observation_network,
-                      self._target_policy_network
-                  ]),
+              'rng': tf.random.get_global_generator(),
+              'random_state': self._random_state,
           })
 
     # Do not record timestamps until after the first learning step is done.
@@ -197,7 +212,8 @@ class MPOLearner(acme.Learner):
       target_action_distribution = self._target_policy_network(o_t)
 
       # Get sampled actions to evaluate policy; of size [N, B, ...].
-      sampled_actions = target_action_distribution.sample(self._num_samples)
+      sampled_actions = target_action_distribution.sample(
+          self._num_samples, seed=checkpointing.stateless_seed())
       tiled_o_t = tf2_utils.tile_tensor(o_t, self._num_samples)  # [N, B, ...]
 
       # Compute the target critic's Q-value of the sampled actions in state o_t.
