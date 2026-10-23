@@ -46,6 +46,10 @@ _ANT_TASK = flags.DEFINE_enum(
     'Open Ant task. Used when --env=open_ant.')
 _CONTROL_DT = flags.DEFINE_float(
     'control_dt', 0.12, 'Open Ant control timestep in seconds.')
+_TERMINATE_ON_UPSIDE_DOWN = flags.DEFINE_boolean(
+    'terminate_on_upside_down', True,
+    'End the Open Ant episode when the body up-axis points below the '
+    'horizontal. The simulator then resets.')
 _RADIUS = flags.DEFINE_float(
     'radius', 1.0,
     'Open Ant back-and-forth circle radius in meters.')
@@ -108,6 +112,7 @@ def _make_open_ant_environment(evaluation: bool = False):
       evaluation=evaluation,
       task_name=_ANT_TASK.value,
       control_dt=_CONTROL_DT.value,
+      terminate_on_upside_down=_TERMINATE_ON_UPSIDE_DOWN.value,
       radius=_RADIUS.value,
       origin=(float(_ORIGIN.value[0]), float(_ORIGIN.value[1])),
       record_video=_RECORD_VIDEO.value,

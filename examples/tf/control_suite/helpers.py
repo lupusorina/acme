@@ -149,6 +149,7 @@ def make_open_ant_environment(
     evaluation: bool = False,
     task_name: str = 'forward',
     control_dt: float = 0.02,
+    terminate_on_upside_down: bool = True,
     radius: float = 1.0,
     origin=(0.0, 0.0),
     record_video: bool = False,
@@ -162,6 +163,8 @@ def make_open_ant_environment(
     evaluation: When True, this is the evaluator and video is not recorded.
     task_name: `forward` or `back_and_forth`.
     control_dt: Simulator control period in seconds.
+    terminate_on_upside_down: End the episode when the body up-axis points
+      below the horizontal.
     radius: Back-and-forth circle radius in meters.
     origin: Back-and-forth circle center (x, y) in meters.
     record_video: Record one training actor when evaluation is False.
@@ -184,7 +187,10 @@ def make_open_ant_environment(
   record_this_actor = _claim_training_video(record_video, evaluation)
   render_mode = 'rgb_array' if record_this_actor else None
   environment = ant_env_cls(
-      control_dt=control_dt, render_mode=render_mode, task=task)
+      control_dt=control_dt,
+      render_mode=render_mode,
+      terminate_on_upside_down=terminate_on_upside_down,
+      task=task)
   if record_this_actor:
     _frame_video_camera(environment)
     environment = _record_open_ant_video(
