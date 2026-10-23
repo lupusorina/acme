@@ -19,9 +19,11 @@ from typing import Dict, Sequence
 
 from absl import app
 from absl import flags
+from absl import logging
 from acme import specs
 from acme import types
 from acme.agents.tf import mpo
+from acme.utils import paths
 import helpers
 from acme.tf import networks
 from acme.tf import utils as tf2_utils
@@ -33,7 +35,7 @@ import sonnet as snt
 # Flags which modify the behavior of the launcher.
 FLAGS = flags.FLAGS
 _MAX_ACTOR_STEPS = flags.DEFINE_integer(
-    'max_actor_steps', 100_000,
+    'max_actor_steps', 500_000,
     'Number of actor steps to run; defaults to None for an endless loop.')
 _ENV = flags.DEFINE_enum(
     'env', 'control_suite', ['control_suite', 'open_ant'],
@@ -71,6 +73,8 @@ _VIDEO_STEPS = flags.DEFINE_integer(
 _VIDEO_DIR = flags.DEFINE_string(
     'video_dir', '',
     'Directory for --record_video. Empty uses ~/acme/<acme_id>/videos.')
+# Same default as the embodied-Ant trainer in open-ant/agents/mpo.
+_OPEN_ANT_REWARD_SCALE = 100.0
 
 
 def make_networks(
@@ -118,9 +122,10 @@ def _make_open_ant_environment(evaluation: bool = False):
       record_video=_RECORD_VIDEO.value,
       record_every=_RECORD_EVERY.value,
       video_steps=_VIDEO_STEPS.value,
-      video_dir=_VIDEO_DIR.value)
+      video_dir=_VIDEO_DIR.value,
+      reward_scale=_OPEN_ANT_REWARD_SCALE)
   return helpers.maybe_log_average_reward(
-      environment, evaluation, _CONTROL_DT.value)
+      environment, evaluation, _CONTROL_DT.value, _OPEN_ANT_REWARD_SCALE)
 
 
 def main(_):
@@ -133,6 +138,17 @@ def main(_):
         helpers.make_environment,
         domain_name=_DOMAIN.value,
         task_name=_TASK.value)
+
+  acme_id = paths.get_unique_id()[0]
+  logging.info(
+      'Learner weights, optimizer moments, dual variables, replay, step '
+      'counts, and random state are saved under ~/acme/%s. Each actor also '
+      'saves its random state and, in simulation, the episode state. Restart '
+      'this run with --acme_id=%s', acme_id, acme_id)
+  # A full replay checkpoint can take longer than Launchpad's 10s stop window.
+  # A second Ctrl-C still kills the process immediately.
+  if not FLAGS['lp_termination_notice_secs'].present:
+    FLAGS.lp_termination_notice_secs = 180
 
   # Construct the program.
   program_builder = mpo.DistributedMPO(

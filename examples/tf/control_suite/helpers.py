@@ -156,6 +156,7 @@ def make_open_ant_environment(
     record_every: int = 10,
     video_steps: int = 200,
     video_dir: str = '',
+    reward_scale: float = 1.0,
 ) -> dm_env.Environment:
   """Open Ant simulator as a dm_env environment.
 
@@ -171,6 +172,7 @@ def make_open_ant_environment(
     record_every: Start a clip every this many training-actor steps.
     video_steps: Steps written into each clip before the mp4 is saved.
     video_dir: Output directory. Empty uses ~/acme/<acme_id>/videos.
+    reward_scale: Multiplier applied to the reward returned to the agent.
   """
   ant_env_cls, forward_task, back_and_forth_task = _load_open_ant()
   if task_name == 'forward':
@@ -198,6 +200,11 @@ def make_open_ant_environment(
         record_every=record_every,
         video_steps=video_steps,
         video_dir=video_dir)
+  if reward_scale != 1.0:
+    import gymnasium as gym  # pylint: disable=g-import-not-at-top
+    logging.info('Scaling Open Ant rewards by %s', reward_scale)
+    environment = gym.wrappers.TransformReward(
+        environment, lambda reward, scale=reward_scale: reward * scale)
   environment = GymnasiumWrapper(environment)
   environment = wrappers.CanonicalSpecWrapper(environment, clip=True)
   environment = wrappers.SinglePrecisionWrapper(environment)
@@ -291,8 +298,8 @@ class AverageRewardLogWrapper(dm_env.Environment):
   """Logs average reward to SimEmbodiedAnt_average_rewards.csv.
 
   Columns are step, raw_reward, reward, mean_return. `reward` is the mean
-  reward-per-second over a 120 second window. `raw_reward` is the unscaled
-  environment reward.
+  reward-per-second over a 120 second window. `raw_reward` is the simulator
+  reward before `reward_scale` is applied.
   """
 
   def __init__(self,
@@ -301,8 +308,10 @@ class AverageRewardLogWrapper(dm_env.Environment):
                log_folder: str,
                env_id: str = 'SimEmbodiedAnt',
                time_window: float = 120.0,
-               flush_every: int = 4000):
+               flush_every: int = 4000,
+               reward_scale: float = 1.0):
     self._environment = environment
+    self._reward_scale = float(reward_scale)
     self._flush_every = flush_every
     self._steps_since_flush = 0
     self._episode_return = 0.0
@@ -318,7 +327,7 @@ class AverageRewardLogWrapper(dm_env.Environment):
 
   def step(self, action: types.NestedArray) -> dm_env.TimeStep:
     timestep = self._environment.step(action)
-    reward = float(np.asarray(timestep.reward))
+    reward = float(np.asarray(timestep.reward)) / self._reward_scale
     self._tracker.update(reward)
     self._episode_return += reward
     self._steps_since_flush += 1
@@ -354,6 +363,7 @@ def maybe_log_average_reward(
     environment: dm_env.Environment,
     evaluation: bool,
     control_dt: float,
+    reward_scale: float = 1.0,
 ) -> dm_env.Environment:
   """Attach the average-reward CSV to one training actor.
 
@@ -374,4 +384,5 @@ def maybe_log_average_reward(
   from acme.utils import paths  # pylint: disable=g-import-not-at-top
   log_folder = os.path.join(
       os.path.expanduser('~/acme'), paths.get_unique_id()[0])
-  return AverageRewardLogWrapper(environment, control_dt, log_folder)
+  return AverageRewardLogWrapper(
+      environment, control_dt, log_folder, reward_scale=reward_scale)
