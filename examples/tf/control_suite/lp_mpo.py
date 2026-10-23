@@ -25,6 +25,7 @@ from acme import types
 from acme.agents.tf import mpo
 from acme.utils import paths
 import helpers
+from acme.tf import losses
 from acme.tf import networks
 from acme.tf import utils as tf2_utils
 import launchpad as lp
@@ -81,6 +82,20 @@ _VIDEO_DIR = flags.DEFINE_string(
 _OPEN_ANT_REWARD_SCALE = 100.0
 
 
+def make_policy_loss() -> snt.Module:
+  """MPO dual constraints from open-ant/agents/mpo/mpo_acme.py."""
+  return losses.MPO(
+      epsilon=1e-1,
+      epsilon_mean=2.5e-3,
+      epsilon_stddev=1e-6,
+      init_log_temperature=10.,
+      init_log_alpha_mean=10.,
+      init_log_alpha_stddev=1000.,
+      action_penalization=True,
+      epsilon_penalty=1e-3,
+  )
+
+
 def make_networks(
     action_spec: specs.BoundedArray,
     policy_layer_sizes: Sequence[int] = (256, 256, 256),
@@ -93,7 +108,10 @@ def make_networks(
   policy_network = snt.Sequential([
       networks.LayerNormMLP(policy_layer_sizes, activate_final=True),
       networks.MultivariateNormalDiagHead(
-          num_dimensions, init_scale=0.7, use_tfd_independent=False) # TODO: the code was not running when use_tfd_independent was True
+          num_dimensions,
+          init_scale=0.7,
+          min_scale=1e-4,
+          use_tfd_independent=False)  # TODO: the code was not running when use_tfd_independent was True
   ])
 
   # The multiplexer concatenates the (maybe transformed) observations/actions.
@@ -155,13 +173,28 @@ def main(_):
   if not FLAGS['lp_termination_notice_secs'].present:
     FLAGS.lp_termination_notice_secs = 180
 
-  # Construct the program.
+  # Learning hyperparameters match the defaults in
+  # open-ant/agents/mpo/mpo_acme.py. Actor count stays at 4: that file's
+  # --num_envs is a vectorized-env setting, and the samples-per-insert ratio
+  # does not depend on it.
   program_builder = mpo.DistributedMPO(
       make_environment,
       make_networks,
-      target_policy_update_period=25,
-      max_actor_steps=_MAX_ACTOR_STEPS.value,
-      num_actors=4)
+      num_actors=4,
+      batch_size=512,
+      min_replay_size=200,
+      max_replay_size=1_000_000,
+      samples_per_insert=1536.0,
+      n_step=5,
+      num_samples=64,
+      additional_discount=0.92,
+      target_policy_update_period=100,
+      target_critic_update_period=100,
+      policy_loss_factory=make_policy_loss,
+      policy_learning_rate=3e-4,
+      critic_learning_rate=1e-3,
+      dual_learning_rate=1e-3,
+      max_actor_steps=_MAX_ACTOR_STEPS.value)
 
   lp.launch(programs=program_builder.build())
 

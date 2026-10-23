@@ -161,6 +161,9 @@ class DistributedMPO:
       target_critic_update_period: int = 100,
       variable_update_period: int = 1000,
       policy_loss_factory: Optional[Callable[[], snt.Module]] = None,
+      policy_learning_rate: float = 1e-4,
+      critic_learning_rate: float = 1e-4,
+      dual_learning_rate: float = 1e-2,
       max_actor_steps: Optional[int] = None,
       log_every: float = 10.0,
       checkpoint_time_delta_minutes: float = 10.0,
@@ -172,6 +175,9 @@ class DistributedMPO:
     self._environment_factory = environment_factory
     self._network_factory = network_factory
     self._policy_loss_factory = policy_loss_factory
+    self._policy_learning_rate = policy_learning_rate
+    self._critic_learning_rate = critic_learning_rate
+    self._dual_learning_rate = dual_learning_rate
     self._environment_spec = environment_spec
     self._num_actors = num_actors
     self._num_caches = num_caches
@@ -284,6 +290,9 @@ class DistributedMPO:
         target_policy_update_period=self._target_policy_update_period,
         target_critic_update_period=self._target_critic_update_period,
         policy_loss_module=policy_loss_module,
+        policy_optimizer=snt.optimizers.Adam(self._policy_learning_rate),
+        critic_optimizer=snt.optimizers.Adam(self._critic_learning_rate),
+        dual_optimizer=snt.optimizers.Adam(self._dual_learning_rate),
         dataset=dataset,
         counter=counter,
         logger=logger,
