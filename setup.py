@@ -48,7 +48,7 @@ core_requirements = [
     'absl-py',
     'dm-env',
     'dm-tree',
-    'numpy',
+    'numpy>=1.21,<2',
     'pillow',
     'typing-extensions',
 ]
@@ -81,6 +81,9 @@ envs_requirements = [
     'gym[atari]',
     'pygame==2.1.0',
     'rlds',
+    # Gymnasium RecordVideo imports moviepy.video.io.ImageSequenceClip, which
+    # MoviePy 2.x removed.
+    'moviepy>=1.0.0,<2',
 ]
 
 
