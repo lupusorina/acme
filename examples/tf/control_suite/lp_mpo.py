@@ -58,6 +58,10 @@ _RADIUS = flags.DEFINE_float(
 _ORIGIN = flags.DEFINE_list(
     'origin', ['0', '0'],
     'Open Ant back-and-forth origin x,y in meters. Example: --origin=0,0.')
+_XML = flags.DEFINE_string(
+    'xml', '',
+    'MuJoCo XML for --env=open_ant. Empty uses the Open Ant default model. '
+    'Set this to restart a checkpoint on another robot model.')
 _RECORD_VIDEO = flags.DEFINE_boolean(
     'record_video', False,
     'Record one Open Ant training actor with Gymnasium RecordVideo. '
@@ -119,6 +123,7 @@ def _make_open_ant_environment(evaluation: bool = False):
       terminate_on_upside_down=_TERMINATE_ON_UPSIDE_DOWN.value,
       radius=_RADIUS.value,
       origin=(float(_ORIGIN.value[0]), float(_ORIGIN.value[1])),
+      xml_path=_XML.value,
       record_video=_RECORD_VIDEO.value,
       record_every=_RECORD_EVERY.value,
       video_steps=_VIDEO_STEPS.value,

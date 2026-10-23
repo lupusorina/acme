@@ -152,6 +152,7 @@ def make_open_ant_environment(
     terminate_on_upside_down: bool = True,
     radius: float = 1.0,
     origin=(0.0, 0.0),
+    xml_path: str = '',
     record_video: bool = False,
     record_every: int = 10,
     video_steps: int = 200,
@@ -168,6 +169,8 @@ def make_open_ant_environment(
       below the horizontal.
     radius: Back-and-forth circle radius in meters.
     origin: Back-and-forth circle center (x, y) in meters.
+    xml_path: MuJoCo XML passed to AntEnv as model_path. Empty uses the
+      simulator default.
     record_video: Record one training actor when evaluation is False.
     record_every: Start a clip every this many training-actor steps.
     video_steps: Steps written into each clip before the mp4 is saved.
@@ -188,11 +191,15 @@ def make_open_ant_environment(
 
   record_this_actor = _claim_training_video(record_video, evaluation)
   render_mode = 'rgb_array' if record_this_actor else None
-  environment = ant_env_cls(
+  env_kwargs = dict(
       control_dt=control_dt,
       render_mode=render_mode,
       terminate_on_upside_down=terminate_on_upside_down,
       task=task)
+  if xml_path:
+    env_kwargs['model_path'] = os.path.expanduser(xml_path)
+    logging.info('Loading Open Ant from %s', env_kwargs['model_path'])
+  environment = ant_env_cls(**env_kwargs)
   if record_this_actor:
     _frame_video_camera(environment)
     environment = _record_open_ant_video(
